@@ -1,0 +1,53 @@
+zstd, lz4, xxhash all mostly made by same person (Yann Collet, "Cyan4973").
+
+(note v1.5.7 tag, not dev branch):
+https://github.com/facebook/zstd/blob/v1.5.7/doc/zstd_compression_format.md
+
+Compression methods used (?):
+- LZ77/LZ78 (?): https://en.wikipedia.org/wiki/LZ77_and_LZ78
+- Huffman Coding: https://en.wikipedia.org/wiki/Huffman_coding
+- Finite State Entropy (FSE) based on Asymmetric Numeral Systems (ANS).
+
+zstd multithreaded decoder, uses skipable frames inserted by special compressor to delineate "partitions" upfront?
+https://github.com/amd/aocl-compression
+
+--------------------------------------------------------------------------------------------------
+
+$ git remote add upstream git@github.com:facebook/zstd.git
+
+$ git remote -v
+origin  git@github.com:Jonathan-Weinstein/zstd.git (fetch)
+origin  git@github.com:Jonathan-Weinstein/zstd.git (push)
+upstream        git@github.com:facebook/zstd.git (fetch)
+upstream        git@github.com:facebook/zstd.git (push)
+
+$ git checkout tags/v1.5.7 -b v1.5.7-original
+Switched to a new branch 'v1.5.7-original'
+
+git push --set-upstream origin v1.5.7-original
+
+$ git checkout -b v1.5.7-jw
+Switched to a new branch 'v1.5.7-jw'
+
+git push --set-upstream origin v1.5.7-jw
+# made default branch on github
+
+https://github.com/Jonathan-Weinstein/zstd
+
+--------------------------------------------------------------------------------------------------
+
+build/VS2010/zstd.sln
+build/single_file_libs
+
+playground\data>..\..\build\VS2010\bin\x64_Debug\zstd.exe Ax256.txt
+Ax256.txt            :  8.98%   (   256 B =>     23 B, Ax256.txt.zst)
+
+..\..\build\VS2010\bin\x64_Debug\zstd.exe -v Ax256Bx256.txt
+*** Zstandard CLI (64-bit) v1.5.7, by Yann Collet ***
+Ax256Bx256.txt       :  5.08%   (   512 B =>     26 B, Ax256Bx256.txt.zst)
+
+powershell Format-Hex
+
+playground\data> ..\..\build\VS2010\bin\x64_Debug\zstd.exe -v .\rand256.bin
+*** Zstandard CLI (64-bit) v1.5.7, by Yann Collet ***
+.\rand256.bin        :105.47%   (   256 B =>    270 B, .\rand256.bin.zst)
