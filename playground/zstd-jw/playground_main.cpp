@@ -47,7 +47,7 @@ enum : supported_window_size_t {
 };
 constexpr supported_window_size_t DecodeWindowSize(uint8_t Window_Descriptor)
 {
-    // Normal "float" encoding, e5m3. Like TLSF.
+    // Normal "float" e5m3 encoding. Like TLSF but with bias.
     uint const Mantissa = Window_Descriptor & 0x7;
     uint const Exponent = Window_Descriptor >> 3; // biased
     return supported_window_size_t(0x8 | Mantissa) << (Exponent + 7);
@@ -103,14 +103,14 @@ ptrdiff_t jw_zstd_decompress(uint8_t* dst, size_t _dstCapacity, const uint8_t* s
                 if (!(Frame_Header_Descriptor & Frame_Header::Single_Segment_flag))
                     Frame_Content_Size = 0;
                 else
-                    Frame_Content_Size =
-                        Window_Size    = loadu_postinc(uint8_t,  src);
+                    Frame_Content_Size = loadu_postinc(uint8_t,  src);
                 break;
             case 1: Frame_Content_Size = loadu_postinc(uint16_t, src) + 256; break;
             case 2: Frame_Content_Size = loadu_postinc(uint32_t, src);       break;
             case 3: Frame_Content_Size = loadu_postinc(uint64_t, src);       break;
             default: unreachable;
         }
+        Window_Size = (Frame_Header_Descriptor & Frame_Header::Single_Segment_flag) ? Frame_Content_Size : Window_Size;
         dc.dstCurrentFrameExpectedEndOrGlobalCap = Frame_Content_Size ? dst + Frame_Content_Size : dc.dstGlobalCap;
 
         uint8_t *const dstFrameDecompressedBase = dst;
@@ -168,6 +168,19 @@ static constexpr uint8_t Empty_zst[] = {
     0x28, 0xb5, 0x2f, 0xfd, 0x24, 0x00, 0x01, 0x00, 0x00, 0x99, 0xe9, 0xd8, 0x51
 };
 
+// playground\data> ..\zstd-jw\x64\Debug\zstd-jw.exe bin2c C:\ice\untracked\zstd\playground\data\ABC.txt.zst
+static constexpr uint8_t ABC_zst[] = {
+    0x28,0xb5,0x2f,0xfd,0x24,0x03,0x19,0x00,0x00,0x41,0x42,0x43,0x98,0xee,0xcf,0x4f,
+};
+
+#if 0
+playground\data> ..\zstd-jw\x64\Debug\zstd-jw.exe bin2c C:\ice\untracked\zstd\playground\data\Ax256.txt.zst
+static constexpr uint8_t Ax256_zst[] = {
+    0x28, 0xb5, 0x2f, 0xfd, 0x64, 0x00, 0x00, 0x4d, 0x00, 0x00, 0x10, 0x41, 0x41, 0x01, 0x00, 0x7b,
+    0x0a, 0x60, 0x01, 0x22, 0x7b, 0x35, 0x4d
+};
+#endif
+
 int main(int const argc, char const *const *const argv)
 {
     int const                tailc = argc - 1;
@@ -219,10 +232,9 @@ int main(int const argc, char const *const *const argv)
                 fputs("    ", stdout);
                 for (uint j = 0;;) {
                     ASSUME(i + j < size);
-                    printf("0x%02x", bytes[i + j]);
+                    printf("0x%02x,", bytes[i + j]);
                     if (++j == nline)
                         break;
-                    fputs(", ", stdout);
                 }
                 fputs("\n", stdout);
                 i += nline;
@@ -242,6 +254,13 @@ int main(int const argc, char const *const *const argv)
         uint8_t dstbuf[2000];
         ptrdiff_t result = jw_zstd_decompress(dstbuf, countof(dstbuf), Empty_zst, countof(Empty_zst));
         printf("result = %lld\n", result);
+    }
+
+    {
+        uint8_t dstbuf[2000];
+        ptrdiff_t result = jw_zstd_decompress(dstbuf, countof(dstbuf), ABC_zst, countof(ABC_zst));
+        Verify(result == 3);
+        Verify(memcmp(dstbuf, "ABC", 3) == 0);
     }
 
     puts("Bye.");
