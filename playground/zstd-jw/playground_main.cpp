@@ -55,15 +55,13 @@ constexpr supported_window_size_t DecodeWindowSize(uint8_t Window_Descriptor)
 static_assert(MaxSupportedWindowSize == DecodeWindowSize(MaxSupportedWindowDescriptor), "");
 
 enum : ptrdiff_t {
-    // NOTE: the negative values of these are returned.
-    decode_error_generic = 1,
-    decode_error_unsupported_window_size,
-    decode_error_unsupported_dictionary,
+    // NOTE: the _negative_ values of these are returned.
+    jw_error_generic = 1,
+    jw_error_unsupported_window_size,
+    jw_error_unsupported_dictionary,
 };
 
-
-
-ptrdiff_t jw_zstd_decompress(uint8_t* dst, size_t _dstCapacity, const uint8_t* src, size_t _srcSize)
+ptrdiff_t jw_decompress(uint8_t* dst, size_t _dstCapacity, const uint8_t* src, size_t _srcSize)
 {
     Context ctx = {};
     ctx.dstGlobalCap = dst + _dstCapacity;
@@ -84,7 +82,7 @@ ptrdiff_t jw_zstd_decompress(uint8_t* dst, size_t _dstCapacity, const uint8_t* s
                 src += Frame_Size;
                 continue;
             // Not sure if the 0xFD2FB528 ZSTD frame magic is optional in some legacy formats.
-            // This should be okay since Reserved_bit must be zero and is bit 3 (8 == (1 << 3)).
+            // This should be okay since Reserved_bit _currently_ must be zero and is bit 3 (8 == (1 << 3)).
             } else if (frameMagic == 0xFD2FB528) {
                 src += 4;
             }
@@ -93,12 +91,12 @@ ptrdiff_t jw_zstd_decompress(uint8_t* dst, size_t _dstCapacity, const uint8_t* s
         // Unpack frame header.
         Frame_Header::Flags const Frame_Header_Descriptor = Frame_Header::Flags(*src++);
         if (Frame_Header_Descriptor & 0x8) // Reserved_bit
-            return -decode_error_generic;
+            return -jw_error_generic;
         supported_window_size_t Window_Size = 0; // might be updated to Frame_Content_Size later
         if (!(Frame_Header_Descriptor & Frame_Header::Single_Segment_flag)) {
             uint8_t const Window_Descriptor = *src++;
             if (MaxSupportedWindowDescriptor < Window_Descriptor)
-                return -decode_error_unsupported_window_size;
+                return -jw_error_unsupported_window_size;
             Window_Size = DecodeWindowSize(Window_Descriptor);
         }
         uint32_t Dictionary_ID;
@@ -110,7 +108,7 @@ ptrdiff_t jw_zstd_decompress(uint8_t* dst, size_t _dstCapacity, const uint8_t* s
             default: unreachable;
         }
         if (Dictionary_ID != 0)
-            return -decode_error_unsupported_dictionary; // unsupported by us
+            return -jw_error_unsupported_dictionary; // unsupported by us
         uint64_t Frame_Content_Size; // original (uncompressed) size, OPTIONAL, 0=unknown
         switch (Frame_Header_Descriptor >> 6) {
             case 0:
@@ -126,7 +124,7 @@ ptrdiff_t jw_zstd_decompress(uint8_t* dst, size_t _dstCapacity, const uint8_t* s
         }
         if (Frame_Header_Descriptor & Frame_Header::Single_Segment_flag) {
             if (MaxSupportedWindowSize < Frame_Content_Size) {
-                return -decode_error_unsupported_window_size;
+                return -jw_error_unsupported_window_size;
             }
             Window_Size = uint32_t(Frame_Content_Size);
         }
@@ -272,13 +270,13 @@ int main(int const argc, char const *const *const argv)
 
     {
         uint8_t dstbuf[2000];
-        ptrdiff_t result = jw_zstd_decompress(dstbuf, countof(dstbuf), Empty_zst, countof(Empty_zst));
+        ptrdiff_t result = jw_decompress(dstbuf, countof(dstbuf), Empty_zst, countof(Empty_zst));
         printf("result = %lld\n", result);
     }
 
     {
         uint8_t dstbuf[2000];
-        ptrdiff_t result = jw_zstd_decompress(dstbuf, countof(dstbuf), ABC_zst, countof(ABC_zst));
+        ptrdiff_t result = jw_decompress(dstbuf, countof(dstbuf), ABC_zst, countof(ABC_zst));
         Verify(result == 3);
         Verify(memcmp(dstbuf, "ABC", 3) == 0);
     }
