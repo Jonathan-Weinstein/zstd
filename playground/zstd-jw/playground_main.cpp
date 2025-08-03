@@ -25,84 +25,12 @@ struct Frame_Header {
 
         Single_Segment_flag     = 1 << 5,
     };
-    enum {
-        // Has Dictionary_ID if nonzero:
-        HasDictionaryID_multiflag = _x_Dictionary_ID_flag0 |
-                                    _x_Dictionary_ID_flag1,
-    };
-
-    uint16_t    magicAndHeaderPackedSize;
-    Flags       flags;
-
-    uint32_t    Dictionary_ID;
-
-    uint64_t    Window_Size;
-    uint64_t    Frame_Content_Size; // original (uncompressed) size, OPTIONAL, 0=unknown
 };
 
-
-static Frame_Header UnpackMagicAndFrameHeader(const uint8_t* p, bool magicless)
-{
-    Frame_Header h;
-
-    const uint8_t* const pBase = p;
-    if (!magicless) {
-        ValidData(loadu(uint32_t, p) == 0xFD2FB528);
-        p += 4;
-    }
-    Frame_Header::Flags const Frame_Header_Descriptor = Frame_Header::Flags(*p++);
-    h.flags = Frame_Header_Descriptor;
-
-    bool const ss = Frame_Header_Descriptor & Frame_Header::Single_Segment_flag;
-
-    int fcsFieldSizeLog2 = Frame_Header_Descriptor >> 6;
-    if (fcsFieldSizeLog2 == 0) {
-        fcsFieldSizeLog2 = ss ? 0 : -1; // (desc >> 5) - 1
-    }
-
-    uint64_t Window_Size = 0;
-    if (!ss) {
-        uint8_t const Window_Descriptor = *p++;
-        uint const Mantissa   = Window_Descriptor & 0x7;
-        uint const Exponent   = Window_Descriptor >> 3;
-
-        uint const windowLog      = 10 + Exponent; // in [10:41]
-        uint64_t const windowBase = uint64_t(1) << windowLog;
-        uint64_t const windowAdd  = (windowBase / 8) * Mantissa;
-        Window_Size               = windowBase + windowAdd;
-    }
-    else {
-        // Window_Size = Frame_Content_Size, latter must be present
-        ValidData(fcsFieldSizeLog2 >= 0);
-    }
-
-    uint32_t did;
-    switch (Frame_Header_Descriptor & Frame_Header::HasDictionaryID_multiflag) {
-        case 0: did = 0;                          break;
-        case 1: did = loadu_postinc(uint8_t,  p); break;
-        case 2: did = loadu_postinc(uint16_t, p); break;
-        case 3: did = loadu_postinc(uint32_t, p); break;
-        default: unreachable;
-    }
-    h.Dictionary_ID = did;
-
-    uint64_t fcs;
-    switch (fcsFieldSizeLog2) {
-        case -1: fcs = 0;                                break;
-        case  0: fcs = loadu_postinc(uint8_t, p);        break;
-        case  1: fcs = loadu_postinc(uint16_t, p) + 256; break;
-        case  2: fcs = loadu_postinc(uint32_t, p);       break;
-        case  3: fcs = loadu_postinc(uint64_t, p);       break;
-        default: unreachable;
-    }
-    h.Frame_Content_Size = fcs;
-
-    Window_Size = ss ? fcs : Window_Size;
-    h.Window_Size = Window_Size;
-
-    h.magicAndHeaderPackedSize = uint16_t(p - pBase);
-    return h;
-}
+struct DecodeContext {
+    const uint8_t*  srcCap;
+    uint8_t*        dstCap;
+};
 
 enum Block_Type_enum {
     Raw_Block,
@@ -110,26 +38,85 @@ enum Block_Type_enum {
     Compressed_Block
 };
 
-size_t jw_zstd_decompress(uint8_t* dst, size_t _dstCapacity, const uint8_t* src, size_t _srcSize)
+// Support a max Window_Size of 16 MiB (means we can do u32 ops instead of u64 here).
+typedef uint32_t supported_window_size_t;
+enum : supported_window_size_t {
+    MaxSupportedWindowDescriptor = (24 - 10) << 3,
+    MaxSupportedWindowSize = 16 << 20
+};
+constexpr supported_window_size_t DecodeWindowSize(uint8_t Window_Descriptor)
 {
-          uint8_t* const dstBase   = dst;
-          uint8_t* const dstCapPtr = dst + _dstCapacity;
-    const uint8_t* const srcCapPtr = src + _srcSize;
+    // Normal "float" encoding, e5m3. Like TLSF.
+    uint const Mantissa = Window_Descriptor & 0x7;
+    uint const Exponent = Window_Descriptor >> 3; // biased
+    return supported_window_size_t(0x8 | Mantissa) << (Exponent + 7);
+}
+static_assert(MaxSupportedWindowSize == DecodeWindowSize(MaxSupportedWindowDescriptor), "");
+
+ptrdiff_t jw_zstd_decompress(uint8_t* dst, size_t _dstCapacity, const uint8_t* src, size_t _srcSize)
+{
+    DecodeContext dc = {};
+    dc.dstCap = dst + _dstCapacity;
+    dc.srcCap = src + _srcSize;
+
+    uint8_t* const dstBase = dst;
 
     for (;;) {
-        ValidData((srcCapPtr - src) >= 4 + 2);
-        const Frame_Header h = UnpackMagicAndFrameHeader(src, false);
-        src += h.magicAndHeaderPackedSize;
+        ValidData((dc.srcCap - src) >= 4);
+        uint32_t const frameMagic = loadu_postinc(uint32_t, src);
+        if ((frameMagic & -16) == 0x184D2A50) {
+            // skippable frame
+            uint32_t const Frame_Size = loadu_postinc(uint32_t, src);
+            ValidData((dc.srcCap - src) >= Frame_Size);
+            src += Frame_Size;
+            continue;
+        }
+        // TODO(?): Some formats may not have this legacy(?) ZSTD frame magic number.
+        // Handle that maybe and don't do _postinc initially.
+        if (frameMagic != 0xFD2FB528) {
+            return -1;
+        }
+
+        // unpack frame header
+        Frame_Header::Flags const Frame_Header_Descriptor = Frame_Header::Flags(*src++);
+        supported_window_size_t Window_Size = 0; // might be updated to Frame_Content_Size later
+        if (!(Frame_Header_Descriptor & Frame_Header::Single_Segment_flag)) {
+            uint8_t const Window_Descriptor = *src++;
+            if (MaxSupportedWindowDescriptor < Window_Descriptor)
+                return -2;
+            Window_Size = DecodeWindowSize(Window_Descriptor);
+        }
+        uint32_t Dictionary_ID;
+        switch (Frame_Header_Descriptor & 0x3) {
+            case 0: Dictionary_ID = 0;                            break;
+            case 1: Dictionary_ID = loadu_postinc(uint8_t,  src); break;
+            case 2: Dictionary_ID = loadu_postinc(uint16_t, src); break;
+            case 3: Dictionary_ID = loadu_postinc(uint32_t, src); break;
+            default: unreachable;
+        }
+        uint64_t Frame_Content_Size; // original (uncompressed) size, OPTIONAL, 0=unknown
+        switch (Frame_Header_Descriptor >> 6) {
+            case 0:
+                if (!(Frame_Header_Descriptor & Frame_Header::Single_Segment_flag))
+                    Frame_Content_Size = 0;
+                else
+                    Frame_Content_Size =
+                        Window_Size    = loadu_postinc(uint8_t,  src);
+                break;
+            case 1: Frame_Content_Size = loadu_postinc(uint16_t, src) + 256; break;
+            case 2: Frame_Content_Size = loadu_postinc(uint32_t, src);       break;
+            case 3: Frame_Content_Size = loadu_postinc(uint64_t, src);       break;
+            default: unreachable;
+        }
 
         uint8_t *const dstFrameDecompressedBase = dst;
-
         for (;;) {
             const uint32_t Block_Header = src[0] | uint32_t(src[1]) << 8 | uint32_t(src[2]) << 16;
             src += 3;
             // const uint8_t *const srcBlockContentBase = src;
 
             const Block_Type_enum Block_Type = Block_Type_enum(Block_Header >> 1 & 0x3);
-            uint32_t blockContentSize = Block_Header >> 3; // not final for RLE_block
+            uint32_t blockContentSize = Block_Header >> 3; // not actual for RLE_block
             if (Block_Type == Raw_Block) {
                 memcpy(dst, src, blockContentSize);
                 dst += blockContentSize;
@@ -143,21 +130,28 @@ size_t jw_zstd_decompress(uint8_t* dst, size_t _dstCapacity, const uint8_t* src,
             else {
                 ValidData(Block_Type == Compressed_Block);
                 Implemented(0);
+                ptrdiff_t res = 0; // TODO
+                if (res < 0)
+                    return res;
+                dst += res;
             }
 
             if (Block_Header & 1) // Last_Block
                 break;
         }
 
-        if (h.flags & Frame_Header::Content_Checksum_flag) {
+        size_t const decompressedFrameSize = dst - dstFrameDecompressedBase;
+        ValidData(Frame_Content_Size == 0 || Frame_Content_Size >= decompressedFrameSize);
+        // Don't really care about checksum most of the time, but still make sure to skip field (_postinc).
+        if (Frame_Header_Descriptor & Frame_Header::Content_Checksum_flag) {
             const uint32_t expectedChecksum = loadu_postinc(uint32_t, src);
-            const uint32_t gotChecksum = CalculateZstdFrameChecksum(dstFrameDecompressedBase, dst - dstFrameDecompressedBase);
+            const uint32_t gotChecksum = CalculateZstdFrameChecksum(dstFrameDecompressedBase, decompressedFrameSize);
             ValidData(expectedChecksum == gotChecksum);
         }
 
-        if (src >= srcCapPtr) {
-            Verify(src == srcCapPtr);
-            Verify(dstCapPtr >= dst);
+        if (src >= dc.srcCap) {
+            Verify(src == dc.srcCap);
+            Verify(dc.dstCap >= dst);
             return dst - dstBase;
         }
     }
