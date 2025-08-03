@@ -19,17 +19,18 @@ uint32_t CalculateZstdFrameChecksum(const uint8_t* decompressedFrame, size_t nby
 
 struct Frame_Header {
     enum Flags : uint8_t {
-        _x_Dictionary_ID_flag0  = 1 << 0,
-        _x_Dictionary_ID_flag1  = 1 << 1,
         Content_Checksum_flag   = 1 << 2,
-
+        Reserved_bit            = 1 << 3,
+        // Unused_bit           = 1 << 4,
         Single_Segment_flag     = 1 << 5,
     };
 };
 
 struct DecodeContext {
-    const uint8_t*  srcCap;
-    uint8_t*        dstCap;
+    const uint8_t* srcGlobalEnd;
+    uint8_t*       dstGlobalCap;
+    const uint8_t* srcCurrentBlockEnd;
+    uint8_t*       dstCurrentFrameExpectedEndOrGlobalCap;
 };
 
 enum Block_Type_enum {
@@ -56,18 +57,18 @@ static_assert(MaxSupportedWindowSize == DecodeWindowSize(MaxSupportedWindowDescr
 ptrdiff_t jw_zstd_decompress(uint8_t* dst, size_t _dstCapacity, const uint8_t* src, size_t _srcSize)
 {
     DecodeContext dc = {};
-    dc.dstCap = dst + _dstCapacity;
-    dc.srcCap = src + _srcSize;
+    dc.dstGlobalCap = dst + _dstCapacity;
+    dc.srcGlobalEnd = src + _srcSize;
 
     uint8_t* const dstBase = dst;
 
     for (;;) {
-        ValidData((dc.srcCap - src) >= 4);
+        ValidData((dc.srcGlobalEnd - src) >= 4);
         uint32_t const frameMagic = loadu_postinc(uint32_t, src);
         if ((frameMagic & -16) == 0x184D2A50) {
             // skippable frame
             uint32_t const Frame_Size = loadu_postinc(uint32_t, src);
-            ValidData((dc.srcCap - src) >= Frame_Size);
+            ValidData((dc.srcGlobalEnd - src) >= Frame_Size);
             src += Frame_Size;
             continue;
         }
@@ -79,11 +80,13 @@ ptrdiff_t jw_zstd_decompress(uint8_t* dst, size_t _dstCapacity, const uint8_t* s
 
         // unpack frame header
         Frame_Header::Flags const Frame_Header_Descriptor = Frame_Header::Flags(*src++);
+        if (Frame_Header_Descriptor & Frame_Header::Reserved_bit)
+            return -2;
         supported_window_size_t Window_Size = 0; // might be updated to Frame_Content_Size later
         if (!(Frame_Header_Descriptor & Frame_Header::Single_Segment_flag)) {
             uint8_t const Window_Descriptor = *src++;
             if (MaxSupportedWindowDescriptor < Window_Descriptor)
-                return -2;
+                return -3;
             Window_Size = DecodeWindowSize(Window_Descriptor);
         }
         uint32_t Dictionary_ID;
@@ -108,12 +111,13 @@ ptrdiff_t jw_zstd_decompress(uint8_t* dst, size_t _dstCapacity, const uint8_t* s
             case 3: Frame_Content_Size = loadu_postinc(uint64_t, src);       break;
             default: unreachable;
         }
+        dc.dstCurrentFrameExpectedEndOrGlobalCap = Frame_Content_Size ? dst + Frame_Content_Size : dc.dstGlobalCap;
 
         uint8_t *const dstFrameDecompressedBase = dst;
         for (;;) {
             const uint32_t Block_Header = src[0] | uint32_t(src[1]) << 8 | uint32_t(src[2]) << 16;
             src += 3;
-            // const uint8_t *const srcBlockContentBase = src;
+            const uint8_t *const Block_Content = src;
 
             const Block_Type_enum Block_Type = Block_Type_enum(Block_Header >> 1 & 0x3);
             uint32_t blockContentSize = Block_Header >> 3; // not actual for RLE_block
@@ -129,8 +133,8 @@ ptrdiff_t jw_zstd_decompress(uint8_t* dst, size_t _dstCapacity, const uint8_t* s
             }
             else {
                 ValidData(Block_Type == Compressed_Block);
-                Implemented(0);
-                ptrdiff_t res = 0; // TODO
+                dc.srcCurrentBlockEnd = Block_Content + blockContentSize;
+                ptrdiff_t res = (Implemented(0), 0); // TODO
                 if (res < 0)
                     return res;
                 dst += res;
@@ -149,9 +153,9 @@ ptrdiff_t jw_zstd_decompress(uint8_t* dst, size_t _dstCapacity, const uint8_t* s
             ValidData(expectedChecksum == gotChecksum);
         }
 
-        if (src >= dc.srcCap) {
-            Verify(src == dc.srcCap);
-            Verify(dc.dstCap >= dst);
+        if (src >= dc.srcGlobalEnd) {
+            Verify(src == dc.srcGlobalEnd);
+            Verify(dc.dstGlobalCap >= dst);
             return dst - dstBase;
         }
     }
