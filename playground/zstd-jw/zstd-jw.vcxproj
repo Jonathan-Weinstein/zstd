@@ -132,6 +132,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="playground_main.cpp" />
+    <ClCompile Include="unity_xxhash.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="common.h" />
