@@ -20,13 +20,13 @@ uint32_t CalculateZstdFrameChecksum(const uint8_t* decompressedFrame, size_t nby
 struct Frame_Header {
     enum Flags : uint8_t {
         Content_Checksum_flag   = 1 << 2,
-        Reserved_bit            = 1 << 3,
-        // Unused_bit           = 1 << 4,
+        // Reserved_bit         = 1 << 3,   // must be zero in current spec
+        // Unused_bit           = 1 << 4,   // user-data bit
         Single_Segment_flag     = 1 << 5,
     };
 };
 
-struct DecodeContext {
+struct Context {
     const uint8_t* srcGlobalEnd;
     uint8_t*       dstGlobalCap;
     const uint8_t* srcCurrentBlockEnd;
@@ -54,39 +54,51 @@ constexpr supported_window_size_t DecodeWindowSize(uint8_t Window_Descriptor)
 }
 static_assert(MaxSupportedWindowSize == DecodeWindowSize(MaxSupportedWindowDescriptor), "");
 
+enum : ptrdiff_t {
+    // NOTE: the negative values of these are returned.
+    decode_error_generic = 1,
+    decode_error_unsupported_window_size,
+    decode_error_unsupported_dictionary,
+};
+
+
+
 ptrdiff_t jw_zstd_decompress(uint8_t* dst, size_t _dstCapacity, const uint8_t* src, size_t _srcSize)
 {
-    DecodeContext dc = {};
-    dc.dstGlobalCap = dst + _dstCapacity;
-    dc.srcGlobalEnd = src + _srcSize;
+    Context ctx = {};
+    ctx.dstGlobalCap = dst + _dstCapacity;
+    ctx.srcGlobalEnd = src + _srcSize;
 
     uint8_t* const dstBase = dst;
 
-    for (;;) {
-        ValidData((dc.srcGlobalEnd - src) >= 4);
-        uint32_t const frameMagic = loadu_postinc(uint32_t, src);
-        if ((frameMagic & -16) == 0x184D2A50) {
-            // skippable frame
-            uint32_t const Frame_Size = loadu_postinc(uint32_t, src);
-            ValidData((dc.srcGlobalEnd - src) >= Frame_Size);
-            src += Frame_Size;
-            continue;
-        }
-        // TODO(?): Some formats may not have this legacy(?) ZSTD frame magic number.
-        // Handle that maybe and don't do _postinc initially.
-        if (frameMagic != 0xFD2FB528) {
-            return -1;
+    while (src < ctx.srcGlobalEnd) {
+        // Deal with frame magic or skippable frames.
+        if ((ctx.srcGlobalEnd - src) >= 4) {
+            uint32_t const frameMagic = loadu(uint32_t, src);
+            if ((frameMagic & -16) == 0x184D2A50) {
+                // skippable frame
+                src += 4;
+                ValidData((ctx.srcGlobalEnd - src) >= 4);
+                uint32_t const Frame_Size = loadu_postinc(uint32_t, src); // of the following payload
+                ValidData((ctx.srcGlobalEnd - src) >= Frame_Size);
+                src += Frame_Size;
+                continue;
+            // Not sure if the 0xFD2FB528 ZSTD frame magic is optional in some legacy formats.
+            // This should be okay since Reserved_bit must be zero and is bit 3 (8 == (1 << 3)).
+            } else if (frameMagic == 0xFD2FB528) {
+                src += 4;
+            }
         }
 
-        // unpack frame header
+        // Unpack frame header.
         Frame_Header::Flags const Frame_Header_Descriptor = Frame_Header::Flags(*src++);
-        if (Frame_Header_Descriptor & Frame_Header::Reserved_bit)
-            return -2;
+        if (Frame_Header_Descriptor & 0x8) // Reserved_bit
+            return -decode_error_generic;
         supported_window_size_t Window_Size = 0; // might be updated to Frame_Content_Size later
         if (!(Frame_Header_Descriptor & Frame_Header::Single_Segment_flag)) {
             uint8_t const Window_Descriptor = *src++;
             if (MaxSupportedWindowDescriptor < Window_Descriptor)
-                return -3;
+                return -decode_error_unsupported_window_size;
             Window_Size = DecodeWindowSize(Window_Descriptor);
         }
         uint32_t Dictionary_ID;
@@ -98,7 +110,7 @@ ptrdiff_t jw_zstd_decompress(uint8_t* dst, size_t _dstCapacity, const uint8_t* s
             default: unreachable;
         }
         if (Dictionary_ID != 0)
-            return -4; // unsupported by us
+            return -decode_error_unsupported_dictionary; // unsupported by us
         uint64_t Frame_Content_Size; // original (uncompressed) size, OPTIONAL, 0=unknown
         switch (Frame_Header_Descriptor >> 6) {
             case 0:
@@ -112,8 +124,13 @@ ptrdiff_t jw_zstd_decompress(uint8_t* dst, size_t _dstCapacity, const uint8_t* s
             case 3: Frame_Content_Size = loadu_postinc(uint64_t, src);       break;
             default: unreachable;
         }
-        Window_Size = (Frame_Header_Descriptor & Frame_Header::Single_Segment_flag) ? Frame_Content_Size : Window_Size;
-        dc.dstCurrentFrameExpectedEndOrGlobalCap = Frame_Content_Size ? dst + Frame_Content_Size : dc.dstGlobalCap;
+        if (Frame_Header_Descriptor & Frame_Header::Single_Segment_flag) {
+            if (MaxSupportedWindowSize < Frame_Content_Size) {
+                return -decode_error_unsupported_window_size;
+            }
+            Window_Size = uint32_t(Frame_Content_Size);
+        }
+        ctx.dstCurrentFrameExpectedEndOrGlobalCap = Frame_Content_Size ? dst + Frame_Content_Size : ctx.dstGlobalCap;
 
         uint8_t *const dstFrameDecompressedBase = dst;
         for (;;) {
@@ -134,7 +151,7 @@ ptrdiff_t jw_zstd_decompress(uint8_t* dst, size_t _dstCapacity, const uint8_t* s
             }
             else {
                 ValidData(Block_Type == Compressed_Block);
-                dc.srcCurrentBlockEnd = Block_Content + blockContentSize;
+                ctx.srcCurrentBlockEnd = Block_Content + blockContentSize;
                 ptrdiff_t res = (Implemented(0), 0); // TODO
                 if (res < 0)
                     return res;
@@ -147,19 +164,21 @@ ptrdiff_t jw_zstd_decompress(uint8_t* dst, size_t _dstCapacity, const uint8_t* s
 
         size_t const decompressedFrameSize = dst - dstFrameDecompressedBase;
         ValidData(Frame_Content_Size == 0 || Frame_Content_Size >= decompressedFrameSize);
-        // Don't really care about checksum most of the time, but still make sure to skip field (_postinc).
-        if (Frame_Header_Descriptor & Frame_Header::Content_Checksum_flag) {
-            const uint32_t expectedChecksum = loadu_postinc(uint32_t, src);
-            const uint32_t gotChecksum = CalculateZstdFrameChecksum(dstFrameDecompressedBase, decompressedFrameSize);
-            ValidData(expectedChecksum == gotChecksum);
-        }
 
-        if (src >= dc.srcGlobalEnd) {
-            Verify(src == dc.srcGlobalEnd);
-            Verify(dc.dstGlobalCap >= dst);
-            return dst - dstBase;
+        if (Frame_Header_Descriptor & Frame_Header::Content_Checksum_flag) {
+            ValidData((ctx.srcGlobalEnd - src) >= 4);
+            if (1) {
+                const uint32_t expectedChecksum = loadu(uint32_t, src);
+                const uint32_t gotChecksum = CalculateZstdFrameChecksum(dstFrameDecompressedBase, decompressedFrameSize);
+                ValidData(expectedChecksum == gotChecksum);
+            }
+            src += 4;
         }
     }
+
+    Verify(src == ctx.srcGlobalEnd);
+    Verify(ctx.dstGlobalCap >= dst);
+    return dst - dstBase;
 }
 
 /*
