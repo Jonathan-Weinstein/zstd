@@ -97,6 +97,8 @@ ptrdiff_t jw_zstd_decompress(uint8_t* dst, size_t _dstCapacity, const uint8_t* s
             case 3: Dictionary_ID = loadu_postinc(uint32_t, src); break;
             default: unreachable;
         }
+        if (Dictionary_ID != 0)
+            return -4; // unsupported by us
         uint64_t Frame_Content_Size; // original (uncompressed) size, OPTIONAL, 0=unknown
         switch (Frame_Header_Descriptor >> 6) {
             case 0:
@@ -118,7 +120,6 @@ ptrdiff_t jw_zstd_decompress(uint8_t* dst, size_t _dstCapacity, const uint8_t* s
             const uint32_t Block_Header = src[0] | uint32_t(src[1]) << 8 | uint32_t(src[2]) << 16;
             src += 3;
             const uint8_t *const Block_Content = src;
-
             const Block_Type_enum Block_Type = Block_Type_enum(Block_Header >> 1 & 0x3);
             uint32_t blockContentSize = Block_Header >> 3; // not actual for RLE_block
             if (Block_Type == Raw_Block) {
@@ -173,7 +174,7 @@ static constexpr uint8_t ABC_zst[] = {
     0x28,0xb5,0x2f,0xfd,0x24,0x03,0x19,0x00,0x00,0x41,0x42,0x43,0x98,0xee,0xcf,0x4f,
 };
 
-#if 0
+#if 0 // it doesn't use RLE for this, will have to construct myself. Add basic file utilites (write/slurp).
 playground\data> ..\zstd-jw\x64\Debug\zstd-jw.exe bin2c C:\ice\untracked\zstd\playground\data\Ax256.txt.zst
 static constexpr uint8_t Ax256_zst[] = {
     0x28, 0xb5, 0x2f, 0xfd, 0x64, 0x00, 0x00, 0x4d, 0x00, 0x00, 0x10, 0x41, 0x41, 0x01, 0x00, 0x7b,
