@@ -126,7 +126,7 @@ ptrdiff_t jw_decompress(uint8_t* dst, size_t _dstCapacity, const uint8_t* src, s
             if (MaxSupportedWindowSize < Frame_Content_Size) {
                 return -jw_error_unsupported_window_size;
             }
-            Window_Size = uint32_t(Frame_Content_Size);
+            Window_Size = TruncateAsserted<supported_window_size_t>(Frame_Content_Size);
         }
         ctx.dstCurrentFrameExpectedEndOrGlobalCap = Frame_Content_Size ? dst + Frame_Content_Size : ctx.dstGlobalCap;
 

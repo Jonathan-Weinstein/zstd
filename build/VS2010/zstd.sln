@@ -17,6 +17,8 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "libzstd-dll", "libzstd-dll\
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "educational_decoder", "..\..\doc\educational_decoder\educational_decoder.vcxproj", "{684F23A9-21AD-44FF-A7DD-09FB2292E9C0}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "playground", "..\..\playground\playground.vcxproj", "{5A9938B2-1D4E-4D6A-9A65-B31311754F31}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Win32 = Debug|Win32
@@ -81,6 +83,14 @@ Global
 		{684F23A9-21AD-44FF-A7DD-09FB2292E9C0}.Release|Win32.Build.0 = Release|Win32
 		{684F23A9-21AD-44FF-A7DD-09FB2292E9C0}.Release|x64.ActiveCfg = Release|x64
 		{684F23A9-21AD-44FF-A7DD-09FB2292E9C0}.Release|x64.Build.0 = Release|x64
+		{5A9938B2-1D4E-4D6A-9A65-B31311754F31}.Debug|Win32.ActiveCfg = Debug|Win32
+		{5A9938B2-1D4E-4D6A-9A65-B31311754F31}.Debug|Win32.Build.0 = Debug|Win32
+		{5A9938B2-1D4E-4D6A-9A65-B31311754F31}.Debug|x64.ActiveCfg = Debug|x64
+		{5A9938B2-1D4E-4D6A-9A65-B31311754F31}.Debug|x64.Build.0 = Debug|x64
+		{5A9938B2-1D4E-4D6A-9A65-B31311754F31}.Release|Win32.ActiveCfg = Release|Win32
+		{5A9938B2-1D4E-4D6A-9A65-B31311754F31}.Release|Win32.Build.0 = Release|Win32
+		{5A9938B2-1D4E-4D6A-9A65-B31311754F31}.Release|x64.ActiveCfg = Release|x64
+		{5A9938B2-1D4E-4D6A-9A65-B31311754F31}.Release|x64.Build.0 = Release|x64
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
