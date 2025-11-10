@@ -5,6 +5,8 @@
 #include <string.h>
 #include <stdlib.h>
 
+#include <vector>
+
 // unaligned little-endian load at byte address
 #define loadu(T, p) (*reinterpret_cast<const T*>(p))
 
@@ -29,8 +31,9 @@ struct Frame_Header {
 struct Context {
     const uint8_t* srcGlobalEnd;
     uint8_t*       dstGlobalCap;
-    const uint8_t* srcCurrentBlockEnd;
     uint8_t*       dstCurrentFrameExpectedEndOrGlobalCap;
+
+    std::vector<uint8_t> literals;
 };
 
 enum Block_Type_enum {
@@ -60,6 +63,105 @@ enum : ptrdiff_t {
     jw_error_unsupported_window_size,
     jw_error_unsupported_dictionary,
 };
+
+// Returns how much was written to dst, or an error.
+// src and Block_Size don't include the 3-byte block header
+static ptrdiff_t ProcessCompressedBlockContent(Context* ctx, uint8_t* dst, const uint8_t* src, size_t Block_Size)
+{
+    enum Literals_Block_Type_enum : uint8_t {
+        Raw_Literals_Block,
+        RLE_Literals_Block,
+        Compressed_Literals_Block,
+        Treeless_Literals_Block
+    };
+    // For sequences: literal-lengths, offsets, match-lengths
+    enum Compression_Mode_enum : uint8_t {
+        Predefined_Mode,
+        RLE_Mode,
+        FSE_Compressed_Mode,
+        Repeat_Mode,
+    };
+    // =========================================================================
+
+    uint8_t       *const dstBase = dst;
+    uint8_t const* const Block_End = src + Block_Size;
+    uint8_t const *const Literals_Section_Header = src;
+
+    const uint8_t Literals_Section_Header_B0 = Literals_Section_Header[0]; // zext to u32
+    const Literals_Block_Type_enum Literals_Block_Type = Literals_Block_Type_enum(Literals_Section_Header_B0 & 0x3);
+    const uint8_t Size_Format = Literals_Section_Header_B0 >> 2 & 0x3;
+    uint32_t Regenerated_Size;
+    switch (Literals_Block_Type) {
+    case Raw_Literals_Block:
+    case RLE_Literals_Block:
+    {
+        if (!(Size_Format & 1)) {
+            Regenerated_Size = Literals_Section_Header_B0 >> 3; // Regenerated_Size shares a bit with Size_Format
+            src += 1;
+        }
+        else {
+            Regenerated_Size = (Literals_Section_Header_B0 >> 4) + (uint32_t(Literals_Section_Header[1]) << 4);
+            src += 2;
+            if (Size_Format & 1) {
+                Regenerated_Size += (uint32_t(Literals_Section_Header[2]) << 12);
+                src += 1;
+            }
+        }
+
+        if (Literals_Block_Type == Raw_Literals_Block) {
+            ctx->literals.assign(src, src + Regenerated_Size); // don't really have to copy, finalize pointer
+            src += Regenerated_Size;
+        }
+        else {
+            ctx->literals.assign(Regenerated_Size, src[0]);
+            src += 1;
+        }
+    } break;
+    case Compressed_Literals_Block:
+    {
+        Implemented(0);
+    } break;
+    case Treeless_Literals_Block: // Huffman tree from previous Huffman-compressed literals block
+    {
+        Implemented(0);
+    } break;
+    default:
+        unreachable;
+    }
+
+    // uint32_t const Sequences_Section_Size = Block_End - src;
+    uint32_t Number_of_Sequences;
+    {
+        uint32_t const byte0 = src[0]; // zext
+        if (byte0 < 128) {
+            Number_of_Sequences = byte0;
+            src += 1;
+        }
+        else if (byte0 < 255) {
+            Number_of_Sequences = ((byte0 - 0x80) << 8) + src[1];
+            src += 2;
+        }
+        else {
+            Number_of_Sequences = src[1] + (uint32_t(src[2]) << 8) + 0x7F00;
+            src += 3;
+        }
+    }
+    uint8_t const modes = *src++;
+    Verify((modes & 0x3) == 0);
+
+    Compression_Mode_enum const Literals_Lengths_Mode = Compression_Mode_enum(modes >> 6 & 0x3);
+
+    return dst - dstBase;
+}
+/*
+This is getting annoying real quick ... seem to need FSE for at least something.
+
+Use parts of EDU decoder.
+Do huffman stuff now.
+
+*/
+
+
 
 ptrdiff_t jw_decompress(uint8_t* dst, size_t _dstCapacity, const uint8_t* src, size_t _srcSize)
 {
@@ -133,8 +235,7 @@ ptrdiff_t jw_decompress(uint8_t* dst, size_t _dstCapacity, const uint8_t* src, s
         uint8_t *const dstFrameDecompressedBase = dst;
         for (;;) {
             const uint32_t Block_Header = src[0] | uint32_t(src[1]) << 8 | uint32_t(src[2]) << 16;
-            src += 3;
-            const uint8_t *const Block_Content = src;
+            src += 3; // then src = Block_Content
             const Block_Type_enum Block_Type = Block_Type_enum(Block_Header >> 1 & 0x3);
             uint32_t blockContentSize = Block_Header >> 3; // not actual for RLE_block
             if (Block_Type == Raw_Block) {
@@ -149,11 +250,11 @@ ptrdiff_t jw_decompress(uint8_t* dst, size_t _dstCapacity, const uint8_t* src, s
             }
             else {
                 ValidData(Block_Type == Compressed_Block);
-                ctx.srcCurrentBlockEnd = Block_Content + blockContentSize;
-                ptrdiff_t res = (Implemented(0), 0); // TODO
+                ptrdiff_t res = ProcessCompressedBlockContent(&ctx, dst, src, blockContentSize);
                 if (res < 0)
                     return res;
                 dst += res;
+                src += blockContentSize;
             }
 
             if (Block_Header & 1) // Last_Block
